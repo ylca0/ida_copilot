@@ -545,15 +545,18 @@ async def create_struct(ctx: RunContext, name: str, members: str) -> str:
         raw = raw.strip()
         if not raw:
             continue
-        m = re.match(r"^(.*?)\s+(\w+)\s*$", raw)
+        m = re.match(r"^(.*)([*\s]+)([A-Za-z_]\w*)\s*$", raw)
         if not m:
             return "invalid member line: %r (expected '<type> <name>')" % raw
-        lines.append("    %s %s;" % (m.group(1).strip(), m.group(2).strip()))
+        # Keep any '*' separators as part of the type (e.g. 'char *y' -> 'char *').
+        type_part = (m.group(1) + m.group(2).replace(" ", "")).strip()
+        lines.append("    %s %s;" % (type_part, m.group(3).strip()))
     if not lines:
         return "no members given"
     decl = "struct %s {\n%s\n};" % (name, "\n".join(lines))
-    printer = ida["kernwin"].msg if hasattr(ida["kernwin"], "msg") else print
-    errs = ida["typeinf"].parse_decls(til, decl, printer, ida["typeinf"].HTI_DCL | ida["typeinf"].HTI_NER)
+    # printer may be None (a.k.a. nullptr) - parse errors are reported via the
+    # returned count rather than a callback.
+    errs = ida["typeinf"].parse_decls(til, decl, None, ida["typeinf"].HTI_DCL | ida["typeinf"].HTI_NER)
     _refresh_ui()
     return "struct %s created (parse_errors=%d)" % (name, errs) if errs == 0 else "failed to create struct %s (%d errors)" % (name, errs)
 
@@ -575,8 +578,7 @@ async def create_enum(ctx: RunContext, name: str, entries: str) -> str:
     if not lines:
         return "no entries given"
     decl = "enum %s { %s };" % (name, "\n".join(lines))
-    printer = ida["kernwin"].msg if hasattr(ida["kernwin"], "msg") else print
-    errs = ida["typeinf"].parse_decls(til, decl, printer, ida["typeinf"].HTI_DCL | ida["typeinf"].HTI_NER)
+    errs = ida["typeinf"].parse_decls(til, decl, None, ida["typeinf"].HTI_DCL | ida["typeinf"].HTI_NER)
     _refresh_ui()
     return "enum %s created (parse_errors=%d)" % (name, errs) if errs == 0 else "failed to create enum %s (%d errors)" % (name, errs)
 
