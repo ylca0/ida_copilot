@@ -31,11 +31,12 @@ _ACTION_NAME = "ida_copilot:open_window"
 
 
 class _BridgeSignals(QtCore.QObject):
-    text_delta = QtCore.pyqtSignal(str)
-    thinking_delta = QtCore.pyqtSignal(str)
-    tool_start = QtCore.pyqtSignal(str, str)
-    tool_delta = QtCore.pyqtSignal(str, str)
-    tool_result = QtCore.pyqtSignal(str, str)
+    part_start = QtCore.pyqtSignal(int, str)
+    text_delta = QtCore.pyqtSignal(int, str)
+    thinking_delta = QtCore.pyqtSignal(int, str)
+    tool_start = QtCore.pyqtSignal(int, str, str)
+    tool_delta = QtCore.pyqtSignal(int, str, str)
+    tool_result = QtCore.pyqtSignal(int, str, str)
     turn_start = QtCore.pyqtSignal()
     turn_end = QtCore.pyqtSignal()
     error = QtCore.pyqtSignal(str)
@@ -204,12 +205,10 @@ class _CollapsibleBlock(QtWidgets.QFrame):
 class _ChatItem:
     role: str  # user | model | system | error
     text: str = ""
-    thinking: str = ""
-    tools: list[dict[str, str]] = field(default_factory=list)  # {name, args, result}
     widget: Optional[QtWidgets.QWidget] = None
-    text_label: Optional[QtWidgets.QLabel] = None
-    thinking_block: Optional[_CollapsibleBlock] = None
-    tool_blocks: list[_CollapsibleBlock] = field(default_factory=list)
+    body_lay: Optional[QtWidgets.QLayout] = None
+    parts: dict[int, dict[str, Any]] = field(default_factory=dict)  # part_id -> part state
+    part_order: list[int] = field(default_factory=list)  # part ids in arrival order
     busy: bool = False
 
 
@@ -233,6 +232,7 @@ class ChatWidget(QtWidgets.QWidget):
 
         # worker
         self._bridge = _BridgeSignals()
+        self._bridge.part_start.connect(self._on_part_start)
         self._bridge.text_delta.connect(self._on_text_delta)
         self._bridge.thinking_delta.connect(self._on_thinking_delta)
         self._bridge.tool_start.connect(self._on_tool_start)
@@ -313,6 +313,7 @@ class ChatWidget(QtWidgets.QWidget):
 
     def _ensure_agent(self) -> None:
         events = StreamEvents(
+            on_part_start=self._emitter("partstart"),
             on_text_delta=self._emitter("text"),
             on_thinking_delta=self._emitter("thinking"),
             on_tool_call_start=self._emitter("toolstart"),
@@ -329,22 +330,24 @@ class ChatWidget(QtWidgets.QWidget):
         """Return an async callback that forwards a worker event to a Qt signal."""
 
         async def _emit(*args: Any) -> None:
-            if kind == "text":
-                self._bridge.text_delta.emit(args[0] if args else "")
+            if kind == "partstart":
+                self._bridge.part_start.emit(args[0], args[1])
+            elif kind == "text":
+                self._bridge.text_delta.emit(args[0], args[1])
             elif kind == "thinking":
-                self._bridge.thinking_delta.emit(args[0] if args else "")
+                self._bridge.thinking_delta.emit(args[0], args[1])
             elif kind == "toolstart":
-                self._bridge.tool_start.emit(args[0] if args else "", args[1] if len(args) > 1 else "")
+                self._bridge.tool_start.emit(args[0], args[1], args[2])
             elif kind == "tooldelta":
-                self._bridge.tool_delta.emit(args[0] if args else "", args[1] if len(args) > 1 else "")
+                self._bridge.tool_delta.emit(args[0], args[1], args[2])
             elif kind == "toolresult":
-                self._bridge.tool_result.emit(args[0] if args else "", args[1] if len(args) > 1 else "")
+                self._bridge.tool_result.emit(args[0], args[1], args[2])
             elif kind == "turnstart":
                 self._bridge.turn_start.emit()
             elif kind == "turnend":
                 self._bridge.turn_end.emit()
             elif kind == "error":
-                self._bridge.error.emit(args[0] if args else "")
+                self._bridge.error.emit(args[0])
 
         return _emit
 
@@ -380,29 +383,77 @@ class ChatWidget(QtWidgets.QWidget):
 
         holder = QtWidgets.QWidget()
         holder.setLayout(box)
-        item = _ChatItem(role="user", text=text, widget=holder, text_label=label)
+        item = _ChatItem(role="user", text=text, widget=holder)
         return self._add_item(item)
 
     def begin_model_message(self) -> _ChatItem:
-        label = QtWidgets.QLabel()
-        label.setTextFormat(QtCore.Qt.RichText)
-        label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        label.setWordWrap(True)
-        label.setProperty("role", "bubble")
-
         box = QtWidgets.QVBoxLayout()
         box.setContentsMargins(0, 0, 0, 0)
         box.setSpacing(4)
         title = QtWidgets.QLabel('<span style="color:#2e7d32"><b>Assistant</b></span>')
         title.setTextFormat(QtCore.Qt.RichText)
         box.addWidget(title)
-        box.addWidget(label)
 
         holder = QtWidgets.QWidget()
         holder.setLayout(box)
-        item = _ChatItem(role="model", widget=holder, text_label=label, busy=True)
+        item = _ChatItem(role="model", widget=holder, body_lay=box, busy=True)
         self._current = item
         return self._add_item(item)
+
+    def _ensure_part(self, pid: int, kind: str) -> dict[str, Any]:
+        """Return the state dict for ``pid``, creating its widget if needed.
+
+        New parts are appended to the message layout in arrival order, so text /
+        thinking / tool-call blocks interleave exactly as the model produced them.
+        """
+        cur = self._current
+        if cur is None:
+            raise RuntimeError("no active model message")
+        part = cur.parts.get(pid)
+        if part is not None:
+            return part
+        part = {"kind": kind, "text": "", "tool_name": "", "args": "", "result": "", "widget": None, "label": None}
+        cur.parts[pid] = part
+        cur.part_order.append(pid)
+
+        if kind == "text":
+            label = QtWidgets.QLabel()
+            label.setTextFormat(QtCore.Qt.RichText)
+            label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            label.setWordWrap(True)
+            label.setProperty("role", "bubble")
+            part["label"] = label
+            part["widget"] = label
+            cur.body_lay.addWidget(label)
+        elif kind == "thinking":
+            block = _CollapsibleBlock("Thinking", collapsed=True, accent="#8a6d1a", parent=cur.widget)
+            label = QtWidgets.QLabel()
+            label.setTextFormat(QtCore.Qt.RichText)
+            label.setWordWrap(True)
+            label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            label.setProperty("role", "code")
+            block.body().addWidget(label)
+            part["label"] = label
+            part["widget"] = block
+            cur.body_lay.addWidget(block)
+        elif kind == "tool-call":
+            block = _CollapsibleBlock("Tool call", collapsed=True, accent="#00796b", parent=cur.widget)
+            label = QtWidgets.QLabel()
+            label.setTextFormat(QtCore.Qt.RichText)
+            label.setWordWrap(True)
+            label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            label.setProperty("role", "code")
+            block.body().addWidget(label)
+            part["label"] = label
+            part["widget"] = block
+            cur.body_lay.addWidget(block)
+        return part
+
+    def _on_part_start(self, pid: int, kind: str) -> None:
+        if not self._current:
+            return
+        self._ensure_part(pid, kind)
+        self._scroll_to_bottom()
 
     def _on_turn_start(self) -> None:
         self._current = self.begin_model_message()
@@ -419,94 +470,86 @@ class ChatWidget(QtWidgets.QWidget):
         cur = self._current
         if not cur:
             return
-        if cur.text_label:
-            body = cur.text
-            if body:
-                cur.text_label.setText(markdown_to_html(body))
-            else:
-                cur.text_label.setText('<i style="color:#9e9e9e">(no text output)</i>')
+        for pid in cur.part_order:
+            part = cur.parts[pid]
+            if part["kind"] == "text" and part["label"] is not None:
+                body = part["text"]
+                if body:
+                    part["label"].setText(markdown_to_html(body))
+                else:
+                    part["label"].setText('<i style="color:#9e9e9e">(no text output)</i>')
         self._current = None
 
-    def _on_text_delta(self, chunk: str) -> None:
+    def _on_text_delta(self, pid: int, chunk: str) -> None:
         if not self._current:
             return
-        self._current.text += chunk
-        self._update_current_text()
+        try:
+            part = self._ensure_part(pid, "text")
+        except RuntimeError:
+            return
+        part["text"] += chunk
+        if part["label"] is not None:
+            part["label"].setText(_inline(part["text"], newlines_to_br=True))
 
-    def _on_thinking_delta(self, chunk: str) -> None:
+    def _on_thinking_delta(self, pid: int, chunk: str) -> None:
         if not self._current:
             return
-        self._current.thinking += chunk
-        if self._current.thinking_block is None:
-            self._current.thinking_block = _CollapsibleBlock("Thinking", collapsed=True, accent="#8a6d1a", parent=self._current.widget)
-            self._current.widget.layout().insertWidget(self._current.widget.layout().count() - 1, self._current.thinking_block)
-            label = QtWidgets.QLabel()
-            label.setTextFormat(QtCore.Qt.RichText)
-            label.setWordWrap(True)
-            label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-            label.setProperty("role", "code")
-            self._current.thinking_block.body().addWidget(label)
-            self._current.thinking_block._label = label
-        self._current.thinking_block._label.setText(_escape_html(self._current.thinking).replace("\n", "<br>"))
-        self._scroll_to_bottom()
+        try:
+            part = self._ensure_part(pid, "thinking")
+        except RuntimeError:
+            return
+        part["text"] += chunk
+        if part["label"] is not None:
+            part["label"].setText(_escape_html(part["text"]).replace("\n", "<br>"))
 
-    def _on_tool_start(self, tool_name: str, args: str) -> None:
+    def _on_tool_start(self, pid: int, tool_name: str, args: str) -> None:
         if not self._current:
             return
-        rec = {"name": tool_name, "args": args, "result": ""}
-        self._current.tools.append(rec)
-        block = _CollapsibleBlock("Tool: %s" % tool_name, collapsed=True, accent="#00796b", parent=self._current.widget)
-        self._current.widget.layout().insertWidget(self._current.widget.layout().count() - 1, block)
-        label = QtWidgets.QLabel()
-        label.setTextFormat(QtCore.Qt.RichText)
-        label.setWordWrap(True)
-        label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
-        label.setProperty("role", "code")
-        block.body().addWidget(label)
-        block._args_label = label
-        block._rec = rec
-        self._current.tool_blocks.append(block)
-        self._update_tool_args(block, rec)
-        self._scroll_to_bottom()
+        try:
+            part = self._ensure_part(pid, "tool-call")
+        except RuntimeError:
+            return
+        part["tool_name"] = tool_name
+        part["args"] = args or ""
+        self._update_part_tool(part)
 
-    def _on_tool_delta(self, tool_name: str, args: str) -> None:
+    def _on_tool_delta(self, pid: int, tool_name: str, args: str) -> None:
         if not self._current:
             return
-        rec = self._current.tools[-1] if self._current.tools else None
-        if rec is None:
+        part = self._current.parts.get(pid)
+        if part is None:
             return
-        rec["args"] = args
-        if self._current.tool_blocks:
-            self._update_tool_args(self._current.tool_blocks[-1], rec)
+        if tool_name:
+            part["tool_name"] = tool_name
+        part["args"] = (part.get("args") or "") + (args or "")
+        self._update_part_tool(part)
 
-    def _on_tool_result(self, tool_name: str, result: str) -> None:
+    def _on_tool_result(self, pid: int, tool_name: str, result: str) -> None:
         if not self._current:
             return
-        for rec in reversed(self._current.tools):
-            if rec["name"] == tool_name and not rec["result"]:
-                rec["result"] = result
-                break
-        if self._current.tool_blocks and self._current.tool_blocks[-1]._rec["name"] == tool_name:
-            self._update_tool_args(self._current.tool_blocks[-1], self._current.tool_blocks[-1]._rec)
-
-    def _update_tool_args(self, block: _CollapsibleBlock, rec: dict[str, str]) -> None:
-        if not hasattr(block, "_args_label"):
+        part = self._current.parts.get(pid)
+        if part is None:
             return
-        args = rec.get("args", "") or ""
-        result = rec.get("result", "")
+        part["result"] = result
+        self._update_part_tool(part)
+
+    def _update_part_tool(self, part: dict[str, Any]) -> None:
+        label = part.get("label")
+        if label is None:
+            return
+        name = part.get("tool_name") or "?"
+        block = part.get("widget")
+        if block is not None and hasattr(block, "_btn"):
+            block._btn.setText("Tool: %s" % name)
+        args = part.get("args") or ""
+        result = part.get("result") or ""
         html = []
         if args:
             html.append("<b>args:</b><br>%s" % _escape_html(args).replace("\n", "<br>"))
         if result:
             html.append("<b>result:</b><br>%s" % _escape_html(result[:4000]).replace("\n", "<br>"))
-        block._args_label.setText("<br>".join(html))
-
-    def _update_current_text(self) -> None:
-        cur = self._current
-        if not cur or not cur.text_label:
-            return
-        body = cur.text
-        cur.text_label.setText(_inline(body, newlines_to_br=True) if body else "")
+        label.setText("<br>".join(html))
+        self._scroll_to_bottom()
 
     def _on_error(self, msg: str) -> None:
         self._current = None

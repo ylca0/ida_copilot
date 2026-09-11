@@ -19,6 +19,7 @@ from pydantic_ai.messages import (
     FunctionToolResultEvent,
     ModelMessage,
     PartDeltaEvent,
+    PartEndEvent,
     PartStartEvent,
     TextPartDelta,
     ThinkingPartDelta,
@@ -33,13 +34,20 @@ from .tools import IDA_TOOLS
 
 @dataclass
 class StreamEvents:
-    """Callback sink that the worker uses to talk to the UI thread."""
+    """Callback sink that the worker uses to talk to the UI thread.
 
-    on_text_delta: Optional[Callable[[str], Awaitable[None]]] = None
-    on_thinking_delta: Optional[Callable[[str], Awaitable[None]]] = None
-    on_tool_call_start: Optional[Callable[[str, str], Awaitable[None]]] = None  # (tool_name, args_so_far)
-    on_tool_call_delta: Optional[Callable[[str, str], Awaitable[None]]] = None
-    on_tool_result: Optional[Callable[[str, str], Awaitable[None]]] = None  # (tool_name, result)
+    Every content callback carries ``part_id`` — a monotonically increasing
+    id assigned to each model output part as it starts. The UI uses it to
+    render parts (text / thinking / tool-call) in arrival order, so they can
+    interleave naturally instead of being grouped by type.
+    """
+
+    on_part_start: Optional[Callable[[int, str], Awaitable[None]]] = None  # (part_id, kind)
+    on_text_delta: Optional[Callable[[int, str], Awaitable[None]]] = None  # (part_id, chunk)
+    on_thinking_delta: Optional[Callable[[int, str], Awaitable[None]]] = None  # (part_id, chunk)
+    on_tool_call_start: Optional[Callable[[int, str, str], Awaitable[None]]] = None  # (part_id, tool_name, args)
+    on_tool_call_delta: Optional[Callable[[int, str, str], Awaitable[None]]] = None  # (part_id, tool_name, args)
+    on_tool_result: Optional[Callable[[int, str, str], Awaitable[None]]] = None  # (part_id, tool_name, result)
     on_turn_start: Optional[Callable[[], Awaitable[None]]] = None
     on_turn_end: Optional[Callable[[list[ModelMessage]], Awaitable[None]]] = None
     on_error: Optional[Callable[[str], Awaitable[None]]] = None
@@ -215,64 +223,85 @@ class AgentRunner:
                 model_settings=settings,
                 cancellation_token=self._cancel_token,
             ) as events:
-                part_state: dict[int, dict[str, Any]] = {}
+                # part_state maps per-response part index -> globally unique part id.
+                # Part indexes restart from 0 on each new model response (e.g. after
+                # a tool-call loop), so we assign our own monotonic ids to preserve
+                # the true arrival/rendering order.
+                part_state: dict[int, int] = {}
+                part_kinds: dict[int, str] = {}
+                part_seq = 0
+                last_ended_pid: int | None = None
 
                 async for event in events:
                     if isinstance(event, PartStartEvent):
                         kind = event.part.part_kind
-                        state = {"kind": kind, "text": "", "tool_name": "", "args": ""}
-                        part_state[event.index] = state
+                        part_seq += 1
+                        pid = part_seq
+                        part_state[event.index] = pid
+                        part_kinds[pid] = kind
+                        if self.events.on_part_start:
+                            await self.events.on_part_start(pid, kind)
                         if kind == "text":
                             content = getattr(event.part, "content", None) or ""
-                            if content:
-                                state["text"] += content
-                                if self.events.on_text_delta:
-                                    await self.events.on_text_delta(content)
+                            if content and self.events.on_text_delta:
+                                await self.events.on_text_delta(pid, content)
                         elif kind == "thinking":
                             content = getattr(event.part, "content", None) or ""
-                            if content:
-                                state["text"] += content
-                                if self.events.on_thinking_delta:
-                                    await self.events.on_thinking_delta(content)
+                            if content and self.events.on_thinking_delta:
+                                await self.events.on_thinking_delta(pid, content)
+
+                    elif isinstance(event, PartEndEvent):
+                        pid = part_state.get(event.index)
+                        if pid is not None:
+                            last_ended_pid = pid
 
                     elif isinstance(event, PartDeltaEvent):
-                        state = part_state.get(event.index, {"kind": "", "text": "", "tool_name": "", "args": ""})
+                        pid = part_state.get(event.index)
                         delta = event.delta
+                        if pid is None:
+                            continue
                         if isinstance(delta, TextPartDelta):
                             chunk = delta.content_delta or ""
-                            state["text"] += chunk
-                            if self.events.on_text_delta:
-                                await self.events.on_text_delta(chunk)
+                            if chunk and self.events.on_text_delta:
+                                await self.events.on_text_delta(pid, chunk)
                         elif isinstance(delta, ThinkingPartDelta):
                             chunk = delta.content_delta or ""
-                            state["text"] += chunk
-                            if self.events.on_thinking_delta:
-                                await self.events.on_thinking_delta(chunk)
+                            if chunk and self.events.on_thinking_delta:
+                                await self.events.on_thinking_delta(pid, chunk)
                         elif isinstance(delta, ToolCallPartDelta):
-                            state["args"] += (delta.args_delta if isinstance(delta.args_delta, str) else "") or ""
-                            if delta.tool_name_delta:
-                                state["tool_name"] += delta.tool_name_delta
                             if self.events.on_tool_call_delta:
-                                await self.events.on_tool_call_delta(state["tool_name"], state["args"])
+                                await self.events.on_tool_call_delta(
+                                    pid,
+                                    delta.tool_name_delta or "",
+                                    (delta.args_delta if isinstance(delta.args_delta, str) else "") or "",
+                                )
 
                     elif isinstance(event, FunctionToolCallEvent):
                         part = event.part
+                        # FunctionToolCallEvent carries no index; associate it with
+                        # the most recently ended part (the tool-call part).
+                        pid = last_ended_pid
+                        if pid is None:
+                            continue
                         args = part.args or ""
                         if isinstance(args, (dict, list)):
                             import json
 
                             args = json.dumps(args)
                         if self.events.on_tool_call_start:
-                            await self.events.on_tool_call_start(part.tool_name, str(args))
+                            await self.events.on_tool_call_start(pid, part.tool_name, str(args))
 
                     elif isinstance(event, FunctionToolResultEvent):
                         part = event.part
+                        pid = last_ended_pid
+                        if pid is None:
+                            continue
                         tool_name = getattr(part, "tool_name", "?")
                         content = event.content
                         if isinstance(content, (list, tuple)):
                             content = "\n".join(str(c) for c in content)
                         if self.events.on_tool_result:
-                            await self.events.on_tool_result(tool_name, str(content))
+                            await self.events.on_tool_result(pid, tool_name, str(content))
 
                 self._history = list(events.all_messages())
                 if self.events.on_turn_end:
