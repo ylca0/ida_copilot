@@ -439,8 +439,21 @@ class ChatWidget(QtWidgets.QWidget):
         # dragging back to (near) the bottom re-enables it.
         self._stick_to_bottom = (bar.maximum() - value) <= 40
 
+    def _follow_if_bottom(self) -> None:
+        """Immediately scroll to the bottom if the user is following.
+
+        ``_stick_to_bottom`` is maintained by :meth:`_on_scroll_changed`: it is
+        only cleared when the user drags away from the bottom. While it stays
+        true we keep pinning to the latest content, even if ``maximum`` grew
+        past the current ``value`` during a fast stream.
+        """
+        if not self._stick_to_bottom:
+            return
+        bar = self._scroll.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
     def _scroll_to_bottom(self) -> None:
-        """Scroll to the bottom only if the user is already at (or near) it."""
+        """Scroll to the bottom (async, after layout settles) if user is at bottom."""
         if not self._stick_to_bottom:
             return
         QtCore.QTimer.singleShot(
@@ -567,6 +580,7 @@ class ChatWidget(QtWidgets.QWidget):
                 else:
                     part["label"].setText('<i style="color:#9e9e9e">(no text output)</i>')
         self._current = None
+        self._scroll_to_bottom()
 
     def _on_text_delta(self, pid: int, chunk: str) -> None:
         if not self._current:
@@ -580,6 +594,7 @@ class ChatWidget(QtWidgets.QWidget):
             # Re-render the full markdown on every delta so headers, lists and
             # code blocks appear progressively while streaming.
             part["label"].setText(markdown_to_html(part["text"]))
+        self._follow_if_bottom()
 
     def _on_thinking_delta(self, pid: int, chunk: str) -> None:
         if not self._current:
@@ -591,6 +606,7 @@ class ChatWidget(QtWidgets.QWidget):
         part["text"] += chunk
         if part["label"] is not None:
             part["label"].setText(_escape_html(part["text"]).replace("\n", "<br>"))
+        self._follow_if_bottom()
 
     def _on_tool_start(self, pid: int, tool_name: str, args: str) -> None:
         if not self._current:
@@ -641,7 +657,7 @@ class ChatWidget(QtWidgets.QWidget):
         if result:
             html.append("<b>result:</b><br>%s" % _escape_html(result[:4000]).replace("\n", "<br>"))
         label.setText("<br>".join(html))
-        self._scroll_to_bottom()
+        self._follow_if_bottom()
 
     def _on_error(self, msg: str) -> None:
         self._current = None
