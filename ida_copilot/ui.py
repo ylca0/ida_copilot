@@ -397,7 +397,7 @@ class ChatWidget(QtWidgets.QWidget):
         label.setFont(self._code_font)
         label.setProperty("role", "user")
         label.setProperty("role", "bubble")
-        label.setText('<b style="color:#1565c0">Prompt</b>' + markdown_to_html(text))
+        label.setText('<span style="color:#1565c0"><b>Prompt</b></span>' + markdown_to_html(text))
 
         box = QtWidgets.QVBoxLayout()
         box.setContentsMargins(0, 0, 0, 0)
