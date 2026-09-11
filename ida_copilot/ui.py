@@ -89,10 +89,53 @@ def _inline(text: str, newlines_to_br: bool = False) -> str:
 
 
 def markdown_to_html(md: str) -> str:
-    """Convert a small useful subset of markdown to HTML."""
+    """Convert markdown to HTML using markdown-it-py (CommonMark + GFM tables).
+
+    Falls back to the built-in simple renderer if markdown-it-py is missing.
+    """
+    md = md or ""
+    try:
+        html = _markdown_it().render(md).rstrip()
+    except Exception:
+        html = _markdown_to_html_fallback(md)
+    return _style_tables(html)
+
+
+def _style_tables(html: str) -> str:
+    """Add inline border styles to <table> so QLabel rich text shows them cleanly."""
+    html = html.replace(
+        "<table>",
+        '<table cellspacing="0" style="border-collapse:collapse; margin:4px 0;">',
+    )
+    html = re.sub(
+        r"<th([ >])",
+        r'<th style="border:1px solid #c0c0c0; padding:2px 6px; background:#eef1f5;"\1',
+        html,
+    )
+    html = re.sub(
+        r"<td([ >])",
+        r'<td style="border:1px solid #d0d0d0; padding:2px 6px;"\1',
+        html,
+    )
+    return html
+
+
+_markdown_it_instance: Optional[Any] = None
+
+
+def _markdown_it():
+    """Return a cached markdown-it-py renderer (js-default preset)."""
+    global _markdown_it_instance
+    if _markdown_it_instance is None:
+        from markdown_it import MarkdownIt
+
+        _markdown_it_instance = MarkdownIt("js-default")
+    return _markdown_it_instance
+
+
+def _markdown_to_html_fallback(md: str) -> str:
+    """Minimal markdown renderer used only when markdown-it-py is unavailable."""
     lines = md.split("\n")
-    # Trim leading/trailing blank lines so the rendered text has no stray
-    # empty paragraphs at the top or bottom.
     while lines and not lines[0].strip():
         lines.pop(0)
     while lines and not lines[-1].strip():
@@ -129,8 +172,6 @@ def markdown_to_html(md: str) -> str:
             continue
         if not line.strip():
             flush_ul()
-            # Skip standalone blank lines entirely; block transitions are
-            # already separated by the closing/opening tags above.
             continue
         if re.match(r"^\s*[-*+]\s+", line):
             if not in_ul:

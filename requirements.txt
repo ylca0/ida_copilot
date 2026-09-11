@@ -2,3 +2,4 @@ pydantic-ai[openai]>=2.20
 httpx>=0.28
 logfire>=2.0
 PyQt5>=5.15
+markdown-it-py>=3.0
