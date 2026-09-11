@@ -208,6 +208,19 @@ class _CollapsibleBlock(QtWidgets.QFrame):
         return self._body_lay
 
 
+_code_font_cache: Optional["QtGui.QFont"] = None
+
+
+def _ida_code_font() -> "QtGui.QFont":
+    """Return the fixed monospace font used for code content (Consolas)."""
+    from PyQt5 import QtGui
+
+    global _code_font_cache
+    if _code_font_cache is None:
+        _code_font_cache = QtGui.QFont("Consolas", 9)
+    return _code_font_cache
+
+
 @dataclass
 class _ChatItem:
     role: str  # user | model | system | error
@@ -236,6 +249,7 @@ class ChatWidget(QtWidgets.QWidget):
         self.settings = self.store.load()
         self._items: list[_ChatItem] = []
         self._current: Optional[_ChatItem] = None
+        self._code_font = _ida_code_font()
 
         # worker
         self._bridge = _BridgeSignals()
@@ -380,6 +394,7 @@ class ChatWidget(QtWidgets.QWidget):
         label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse | QtCore.Qt.LinksAccessibleByMouse)
         label.setWordWrap(True)
         label.setOpenExternalLinks(True)
+        label.setFont(self._code_font)
         label.setProperty("role", "user")
         label.setProperty("role", "bubble")
         label.setText('<b style="color:#1565c0">Prompt</b>' + markdown_to_html(text))
@@ -432,6 +447,7 @@ class ChatWidget(QtWidgets.QWidget):
             label.setTextFormat(QtCore.Qt.RichText)
             label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
             label.setWordWrap(True)
+            label.setFont(self._code_font)
             label.setProperty("role", "bubble")
             part["label"] = label
             part["widget"] = label
@@ -442,6 +458,7 @@ class ChatWidget(QtWidgets.QWidget):
             label.setTextFormat(QtCore.Qt.RichText)
             label.setWordWrap(True)
             label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            label.setFont(self._code_font)
             label.setProperty("role", "code")
             block.body().addWidget(label)
             part["label"] = label
@@ -453,6 +470,7 @@ class ChatWidget(QtWidgets.QWidget):
             label.setTextFormat(QtCore.Qt.RichText)
             label.setWordWrap(True)
             label.setTextInteractionFlags(QtCore.Qt.TextSelectableByMouse)
+            label.setFont(self._code_font)
             label.setProperty("role", "code")
             block.body().addWidget(label)
             part["label"] = label
