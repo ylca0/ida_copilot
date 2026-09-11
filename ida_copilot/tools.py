@@ -122,7 +122,12 @@ def ida_tool(write: bool = False):
                 except StopIteration as stop:
                     return stop.value
 
-            return _run_on_main(body, write=write)
+            result = _run_on_main(body, write=write)
+            # Strip IDA colour/control tags from any text returned to the model,
+            # so control bytes never render as garbage glyphs in the UI.
+            if isinstance(result, str):
+                return _strip_control_chars(result)
+            return result
 
         return wrapper
 
@@ -145,6 +150,18 @@ def _ea_of(name_or_ea: str) -> int:
 
 def _fmt_ea(ea: int) -> str:
     return "0x%X" % ea
+
+
+# IDA colour-tag control characters. Lines coming from disassembly/pseudocode
+# are wrapped in these tags (e.g. \x01 ... \x02); without stripping them the
+# raw control bytes render as garbage glyphs ("" etc.) in HTML.
+# Keep \t, \r, \n (whitespace) intact.
+_COLOR_TAG_CHARS = frozenset(range(0x01, 0x20)) - {ord("\t"), ord("\r"), ord("\n")}
+
+
+def _strip_control_chars(text: str) -> str:
+    """Remove control characters that are not tabs/newlines."""
+    return "".join(ch for ch in text if ord(ch) not in _COLOR_TAG_CHARS)
 
 
 
@@ -201,7 +218,14 @@ def _cfunc(func_ea: int, max_lines: int = 2000) -> str:
             line = getattr(l, "line", None)
             if line is None:
                 line = str(l)
-            parts.append(str(line).rstrip())
+            line = str(line)
+            # Strip IDA colour tags / control chars that would otherwise render
+            # as garbage glyphs in the chat view.
+            try:
+                line = ida["lines"].tag_remove(line)
+            except Exception:
+                line = _strip_control_chars(line)
+            parts.append(line.rstrip())
         return "\n".join(parts[:max_lines])
     except Exception as e:
         return f"<error reading pseudocode: {e}>"
