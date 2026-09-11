@@ -378,7 +378,7 @@ class ChatWidget(QtWidgets.QWidget):
         label.setOpenExternalLinks(True)
         label.setProperty("role", "user")
         label.setProperty("role", "bubble")
-        label.setText('<b style="color:#1565c0">You</b><br>' + markdown_to_html(text))
+        label.setText('<b style="color:#1565c0">Prompt</b>' + markdown_to_html(text))
 
         box = QtWidgets.QVBoxLayout()
         box.setContentsMargins(0, 0, 0, 0)
