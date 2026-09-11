@@ -684,8 +684,11 @@ class SettingsDialog(QtWidgets.QDialog):
         self._max_ctx.setSingleStep(1024)
         self._max_ctx.setValue(max(int(settings.max_context_length), 1024))
         self._max_out = QtWidgets.QSpinBox()
-        self._max_out.setRange(64, 32768)
-        self._max_out.setValue(max(int(settings.max_output_length), 64))
+        self._max_out.setRange(1, 1_000_000)
+        self._max_out.setValue(max(int(settings.max_output_length), 1))
+        # Give the numeric fields enough room to show large token counts.
+        self._max_ctx.setMinimumWidth(120)
+        self._max_out.setMinimumWidth(120)
         self._thinking = QtWidgets.QCheckBox("Enable thinking / reasoning output")
         self._thinking.setChecked(bool(settings.thinking))
         self._system_prompt = QtWidgets.QPlainTextEdit(settings.system_prompt)
