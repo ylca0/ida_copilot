@@ -785,6 +785,14 @@ class SettingsDialog(QtWidgets.QDialog):
         # Give the numeric fields enough room to show large token counts.
         self._max_ctx.setMinimumWidth(120)
         self._max_out.setMinimumWidth(120)
+        self._req_to = QtWidgets.QSpinBox()
+        self._req_to.setRange(5, 600)
+        self._req_to.setSuffix(" s")
+        self._req_to.setValue(max(int(settings.request_timeout), 5))
+        self._tool_to = QtWidgets.QSpinBox()
+        self._tool_to.setRange(1, 120)
+        self._tool_to.setSuffix(" s")
+        self._tool_to.setValue(max(int(settings.tool_timeout), 1))
         self._thinking = QtWidgets.QCheckBox("Enable thinking / reasoning output")
         self._thinking.setChecked(bool(settings.thinking))
         self._system_prompt = QtWidgets.QPlainTextEdit(settings.system_prompt)
@@ -795,6 +803,8 @@ class SettingsDialog(QtWidgets.QDialog):
         form.addRow("Model", self._model)
         form.addRow("Max Context (tokens)", self._max_ctx)
         form.addRow("Max Output (tokens)", self._max_out)
+        form.addRow("Request Timeout", self._req_to)
+        form.addRow("Tool Timeout", self._tool_to)
         form.addRow("", self._thinking)
         form.addRow("System Prompt", self._system_prompt)
 
@@ -813,6 +823,8 @@ class SettingsDialog(QtWidgets.QDialog):
             model=self._model.text().strip(),
             max_context_length=self._max_ctx.value(),
             max_output_length=self._max_out.value(),
+            request_timeout=self._req_to.value(),
+            tool_timeout=self._tool_to.value(),
             thinking=self._thinking.isChecked(),
             system_prompt=self._system_prompt.toPlainText(),
         )

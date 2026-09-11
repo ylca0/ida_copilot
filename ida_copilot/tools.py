@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import functools
 import re
+import sys
 from typing import Any, Awaitable, Callable
 
 from pydantic_ai import RunContext
@@ -705,23 +706,63 @@ async def list_local_types(ctx: RunContext) -> str:
 # IDAPython execution tool
 # ---------------------------------------------------------------------------
 
+# Default tool execution timeout (seconds); updated by the agent from settings.
+DEFAULT_TOOL_TIMEOUT = 15.0
+
+# Standard-library modules that may NOT be imported because they reach the host
+# OS / filesystem / network / subprocesses.
+_IDAPYTHON_BLOCKED_STDLIB = {
+    "os", "os.path", "sys", "subprocess", "socket", "shutil", "pathlib",
+    "ctypes", "pickle", "marshal", "importlib", "importlib.util",
+    "pdb", "trace", "faulthandler", "signal", "multiprocessing", "threading",
+    "concurrent", "webbrowser", "pty", "tty", "fcntl", "resource", "mmap",
+    "winreg", "msvcrt", "curses", "readline", "turtle", "tkinter",
+    "glob", "fnmatch", "tempfile", "zipfile", "tarfile", "gzip", "bz2",
+    "lzma", "zlib", "shlex", "getpass", "platform", "sysconfig",
+}
+# Common third-party / privileged modules that are always blocked.
+_IDAPYTHON_BLOCKED_EXTERNAL = {
+    "requests", "urllib", "urllib.request", "httpx", "aiohttp", "socketio",
+    "psutil", "pywin32", "win32api", "win32con", "win32process", "pynput",
+    "paramiko", "scp", "ftplib", "smtplib", "http", "http.server", "xmlrpc",
+}
+
 
 def _ida_python_import(name: str, globals=None, locals=None, fromlist=(), level=0):
     """Restricted __import__ for the IDAPython sandbox.
 
-    Only IDA-related modules may be imported; anything else (os, sys,
-    subprocess, socket, requests, urllib, ctypes, ...) is blocked so the code
-    cannot escape to the host OS.
+    IDA modules (ida_*, idc, idautils, idaapi) and Python standard-library
+    modules are importable, except a block-list of host-OS/network/subprocess
+    modules (os, sys, subprocess, socket, pathlib, shutil, ctypes, requests,
+    urllib, ...). This lets the model use math/json/re/struct/... for
+    computation without being able to escape to the host OS.
     """
     if level != 0:
         raise ImportError("relative imports are not allowed")
     base = name.split(".")[0]
-    if not (base.startswith("ida_") or base in ("idc", "idautils", "idaapi")):
-        raise ImportError("import not allowed: %r (IDA modules only)" % name)
-    return __import__(name, globals, locals, fromlist, level)
+
+    # IDA modules always allowed.
+    if base.startswith("ida_") or base in ("idc", "idautils", "idaapi"):
+        return _orig_import(name, globals, locals, fromlist, level)
+
+    # Block dangerous host/OS/network modules outright.
+    if base in _IDAPYTHON_BLOCKED_EXTERNAL or name in _IDAPYTHON_BLOCKED_EXTERNAL:
+        raise ImportError("import not allowed: %r" % name)
+    if base in _IDAPYTHON_BLOCKED_STDLIB or name in _IDAPYTHON_BLOCKED_STDLIB:
+        raise ImportError("import not allowed: %r" % name)
+
+    # Standard-library modules are allowed (math, json, re, struct, ...).
+    stdlib = getattr(sys, "stdlib_module_names", ())
+    if base in stdlib:
+        return _orig_import(name, globals, locals, fromlist, level)
+
+    raise ImportError("import not allowed: %r (IDA or Python stdlib only)" % name)
 
 
-async def run_idapython(ctx: RunContext, code: str) -> str:
+_orig_import = __import__
+
+
+async def run_idapython(ctx: RunContext, code: str, timeout: float = None) -> str:
     """Execute IDAPython code against the current database.
 
     Runs on IDA's main thread, so it can use any IDA API (ida_funcs,
@@ -731,12 +772,17 @@ async def run_idapython(ctx: RunContext, code: str) -> str:
     subprocess, socket, requests, ...) are blocked. Output printed via
     ``print()`` is returned.
 
-    NOTE: keep snippets short. An infinite loop would occupy IDA's main thread
-    until interrupted, just like a hand-typed IDAPython script.
+    If execution exceeds ``timeout`` seconds a KeyboardInterrupt is raised on
+    IDA's main thread (like a Ctrl+C), which aborts the running snippet.
     """
     import builtins
     import contextlib
     import io
+    import threading
+
+    if timeout is None:
+        timeout = DEFAULT_TOOL_TIMEOUT
+    timeout = max(float(timeout), 1.0)
 
     def _run() -> str:
         buf = io.StringIO()
@@ -757,12 +803,34 @@ async def run_idapython(ctx: RunContext, code: str) -> str:
             with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
                 exec(compile(code, "<ida_copilot>", "exec"), namespace, namespace)  # noqa: S102
             return buf.getvalue().rstrip() or "(no output)"
+        except KeyboardInterrupt:
+            return "(timed out after %.0fs - interrupted)" % timeout
         except BaseException as e:  # noqa: BLE001
             return f"error: {type(e).__name__}: {e}"
         finally:
             builtins.__import__ = orig_import
 
-    return _strip_control_chars(_run_on_main(_run, write=True))
+    def _kill() -> None:
+        """After the timeout, raise KeyboardInterrupt on IDA's main thread."""
+        try:
+            import ctypes
+
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                ctypes.c_long(threading.main_thread().ident),
+                ctypes.py_object(KeyboardInterrupt),
+            )
+        except Exception:
+            pass
+
+    timer = threading.Timer(timeout, _kill)
+    timer.daemon = True
+    timer.start()
+    try:
+        result = _run_on_main(_run, write=True)
+    finally:
+        timer.cancel()
+
+    return _strip_control_chars(result)
 
 
 # ---------------------------------------------------------------------------

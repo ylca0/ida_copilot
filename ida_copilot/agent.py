@@ -74,6 +74,14 @@ def build_agent(settings: Settings) -> Agent:
     provider = OpenAIProvider(base_url=endpoint, api_key=api_key or None)
     model = OpenAIChatModel(model_name, provider=provider)
 
+    # Apply the configured tool timeout to tools that use a default.
+    try:
+        from . import tools as _tools
+
+        _tools.DEFAULT_TOOL_TIMEOUT = max(float(settings.tool_timeout), 1.0)
+    except Exception:
+        pass
+
     agent = Agent(
         model,
         deps_type=dict,
@@ -88,6 +96,8 @@ def build_model_settings(settings: Settings) -> dict[str, Any]:
     s: dict[str, Any] = {"max_tokens": max(int(settings.max_output_length), 1)}
     if settings.thinking:
         s["thinking"] = True
+    if settings.request_timeout and settings.request_timeout > 0:
+        s["timeout"] = max(int(settings.request_timeout), 1)
     return s
 
 
