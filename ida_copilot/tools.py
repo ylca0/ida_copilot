@@ -196,7 +196,12 @@ def _cfunc(func_ea: int, max_lines: int = 2000) -> str:
         return "<hexrays failed to decompile this function>"
     try:
         body = cf.get_pseudocode() if hasattr(cf, "get_pseudocode") else []
-        parts = [str(l).rstrip() for l in body]
+        parts = []
+        for l in body:
+            line = getattr(l, "line", None)
+            if line is None:
+                line = str(l)
+            parts.append(str(line).rstrip())
         return "\n".join(parts[:max_lines])
     except Exception as e:
         return f"<error reading pseudocode: {e}>"
