@@ -91,6 +91,12 @@ def _inline(text: str, newlines_to_br: bool = False) -> str:
 def markdown_to_html(md: str) -> str:
     """Convert a small useful subset of markdown to HTML."""
     lines = md.split("\n")
+    # Trim leading/trailing blank lines so the rendered text has no stray
+    # empty paragraphs at the top or bottom.
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
     out: list[str] = []
     in_code = False
     code_buf: list[str] = []
@@ -123,7 +129,8 @@ def markdown_to_html(md: str) -> str:
             continue
         if not line.strip():
             flush_ul()
-            out.append("")
+            # Skip standalone blank lines entirely; block transitions are
+            # already separated by the closing/opening tags above.
             continue
         if re.match(r"^\s*[-*+]\s+", line):
             if not in_ul:
