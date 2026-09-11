@@ -229,8 +229,13 @@ class AgentRunner:
                 # the true arrival/rendering order.
                 part_state: dict[int, int] = {}
                 part_kinds: dict[int, str] = {}
+                # tool_call_pids maps a unique tool_call_id -> part id.
+                # FunctionToolCallEvent/FunctionToolResultEvent carry no part index,
+                # so we correlate them to their tool-call part via the per-call id.
+                # Using tool_call_id (not tool_name) keeps parallel invocations of
+                # the same tool on distinct parts.
+                tool_call_pids: dict[str, int] = {}
                 part_seq = 0
-                last_ended_pid: int | None = None
 
                 async for event in events:
                     if isinstance(event, PartStartEvent):
@@ -250,23 +255,21 @@ class AgentRunner:
                             if content and self.events.on_thinking_delta:
                                 await self.events.on_thinking_delta(pid, content)
                         elif kind == "tool-call":
-                            # PartStartEvent already carries the tool name and
-                            # args, and it always arrives before
-                            # FunctionToolCallEvent, so use it as the primary
-                            # source of the tool name (avoiding "Tool: ?").
+                            # PartStartEvent already carries the tool name, args
+                            # and the unique tool_call_id, and it always arrives
+                            # before FunctionToolCallEvent, so use it as the
+                            # primary source (avoiding "Tool: ?").
                             tool_name = getattr(event.part, "tool_name", "") or ""
+                            call_id = getattr(event.part, "tool_call_id", "") or ""
                             args = getattr(event.part, "args", "") or ""
                             if isinstance(args, (dict, list)):
                                 import json
 
                                 args = json.dumps(args)
+                            if call_id:
+                                tool_call_pids[call_id] = pid
                             if self.events.on_tool_call_start:
                                 await self.events.on_tool_call_start(pid, tool_name, str(args))
-
-                    elif isinstance(event, PartEndEvent):
-                        pid = part_state.get(event.index)
-                        if pid is not None:
-                            last_ended_pid = pid
 
                     elif isinstance(event, PartDeltaEvent):
                         pid = part_state.get(event.index)
@@ -289,30 +292,34 @@ class AgentRunner:
                                     (delta.args_delta if isinstance(delta.args_delta, str) else "") or "",
                                 )
 
-                    elif isinstance(event, FunctionToolCallEvent):
-                        part = event.part
-                        # FunctionToolCallEvent carries no index; associate it with
-                        # the most recently ended part (the tool-call part).
-                        pid = last_ended_pid
-                        if pid is None:
-                            continue
-                        args = part.args or ""
-                        if isinstance(args, (dict, list)):
-                            import json
+                    elif isinstance(event, PartEndEvent):
+                        # Nothing to do: tool results are correlated by tool name.
+                        pass
 
-                            args = json.dumps(args)
-                        if self.events.on_tool_call_start:
-                            await self.events.on_tool_call_start(pid, part.tool_name, str(args))
+                    elif isinstance(event, FunctionToolCallEvent):
+                        # The tool name/args were already emitted from the
+                        # PartStartEvent for this tool-call part; skip the
+                        # duplicate (FunctionToolCallEvent carries no part index).
+                        pass
 
                     elif isinstance(event, FunctionToolResultEvent):
                         part = event.part
-                        pid = last_ended_pid
+                        tool_name = getattr(part, "tool_name", "?")
+                        call_id = getattr(part, "tool_call_id", "") or ""
+                        pid = tool_call_pids.get(call_id)
                         if pid is None:
                             continue
-                        tool_name = getattr(part, "tool_name", "?")
-                        content = event.content
+                        # The tool return value lives on the ToolReturnPart;
+                        # event.content is typically None.
+                        content = getattr(part, "content", None)
+                        if content is None:
+                            content = event.content
                         if isinstance(content, (list, tuple)):
                             content = "\n".join(str(c) for c in content)
+                        elif isinstance(content, dict):
+                            import json
+
+                            content = json.dumps(content, ensure_ascii=False)
                         if self.events.on_tool_result:
                             await self.events.on_tool_result(pid, tool_name, str(content))
 
