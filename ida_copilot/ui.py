@@ -291,6 +291,7 @@ class ChatWidget(QtWidgets.QWidget):
         self._items: list[_ChatItem] = []
         self._current: Optional[_ChatItem] = None
         self._code_font = _ida_code_font()
+        self._stick_to_bottom = True
 
         # worker
         self._bridge = _BridgeSignals()
@@ -333,6 +334,7 @@ class ChatWidget(QtWidgets.QWidget):
         self._scroll = QtWidgets.QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        self._scroll.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
         self._msg_container = QtWidgets.QWidget()
         self._msg_lay = QtWidgets.QVBoxLayout(self._msg_container)
         self._msg_lay.setContentsMargins(2, 2, 2, 2)
@@ -426,8 +428,24 @@ class ChatWidget(QtWidgets.QWidget):
         self._scroll_to_bottom()
         return item
 
+    def _at_bottom(self, threshold: int = 40) -> bool:
+        """True if the scroll bar is at (or within ``threshold`` px of) the bottom."""
+        bar = self._scroll.verticalScrollBar()
+        return bar.maximum() - bar.value() <= threshold
+
+    def _on_scroll_changed(self, value: int) -> None:
+        bar = self._scroll.verticalScrollBar()
+        # When the user drags up away from the bottom we stop auto-following;
+        # dragging back to (near) the bottom re-enables it.
+        self._stick_to_bottom = (bar.maximum() - value) <= 40
+
     def _scroll_to_bottom(self) -> None:
-        QtCore.QTimer.singleShot(0, lambda: self._scroll.verticalScrollBar().setValue(self._scroll.verticalScrollBar().maximum()))
+        """Scroll to the bottom only if the user is already at (or near) it."""
+        if not self._stick_to_bottom:
+            return
+        QtCore.QTimer.singleShot(
+            0, lambda: self._scroll.verticalScrollBar().setValue(self._scroll.verticalScrollBar().maximum())
+        )
 
     def add_user_message(self, text: str) -> _ChatItem:
         label = QtWidgets.QLabel()
