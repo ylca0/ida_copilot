@@ -496,7 +496,9 @@ class ChatWidget(QtWidgets.QWidget):
             return
         part["text"] += chunk
         if part["label"] is not None:
-            part["label"].setText(_inline(part["text"], newlines_to_br=True))
+            # Re-render the full markdown on every delta so headers, lists and
+            # code blocks appear progressively while streaming.
+            part["label"].setText(markdown_to_html(part["text"]))
 
     def _on_thinking_delta(self, pid: int, chunk: str) -> None:
         if not self._current:
