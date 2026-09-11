@@ -249,6 +249,19 @@ class AgentRunner:
                             content = getattr(event.part, "content", None) or ""
                             if content and self.events.on_thinking_delta:
                                 await self.events.on_thinking_delta(pid, content)
+                        elif kind == "tool-call":
+                            # PartStartEvent already carries the tool name and
+                            # args, and it always arrives before
+                            # FunctionToolCallEvent, so use it as the primary
+                            # source of the tool name (avoiding "Tool: ?").
+                            tool_name = getattr(event.part, "tool_name", "") or ""
+                            args = getattr(event.part, "args", "") or ""
+                            if isinstance(args, (dict, list)):
+                                import json
+
+                                args = json.dumps(args)
+                            if self.events.on_tool_call_start:
+                                await self.events.on_tool_call_start(pid, tool_name, str(args))
 
                     elif isinstance(event, PartEndEvent):
                         pid = part_state.get(event.index)

@@ -518,8 +518,10 @@ class ChatWidget(QtWidgets.QWidget):
             part = self._ensure_part(pid, "tool-call")
         except RuntimeError:
             return
-        part["tool_name"] = tool_name
-        part["args"] = args or ""
+        if tool_name:
+            part["tool_name"] = tool_name
+        if args:
+            part["args"] = args
         self._update_part_tool(part)
 
     def _on_tool_delta(self, pid: int, tool_name: str, args: str) -> None:
@@ -546,7 +548,7 @@ class ChatWidget(QtWidgets.QWidget):
         label = part.get("label")
         if label is None:
             return
-        name = part.get("tool_name") or "?"
+        name = part.get("tool_name") or "Tool call"
         block = part.get("widget")
         if block is not None and hasattr(block, "_btn"):
             block._btn.setText("Tool: %s" % name)
