@@ -655,7 +655,10 @@ class ChatWidget(QtWidgets.QWidget):
         if args:
             html.append("<b>args:</b><br>%s" % _escape_html(args).replace("\n", "<br>"))
         if result:
-            html.append("<b>result:</b><br>%s" % _escape_html(result[:4000]).replace("\n", "<br>"))
+            displayed = result[:4000]
+            html.append("<b>result:</b><br>%s" % _escape_html(displayed).replace("\n", "<br>"))
+            if len(result) > len(displayed):
+                html.append('<i style="color:#9e9e9e">... (result truncated, showing first 4000 chars)</i>')
         label.setText("<br>".join(html))
         self._follow_if_bottom()
 
