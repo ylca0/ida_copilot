@@ -702,6 +702,70 @@ async def list_local_types(ctx: RunContext) -> str:
 
 
 # ---------------------------------------------------------------------------
+# IDAPython execution tool
+# ---------------------------------------------------------------------------
+
+
+def _ida_python_import(name: str, globals=None, locals=None, fromlist=(), level=0):
+    """Restricted __import__ for the IDAPython sandbox.
+
+    Only IDA-related modules may be imported; anything else (os, sys,
+    subprocess, socket, requests, urllib, ctypes, ...) is blocked so the code
+    cannot escape to the host OS.
+    """
+    if level != 0:
+        raise ImportError("relative imports are not allowed")
+    base = name.split(".")[0]
+    if not (base.startswith("ida_") or base in ("idc", "idautils", "idaapi")):
+        raise ImportError("import not allowed: %r (IDA modules only)" % name)
+    return __import__(name, globals, locals, fromlist, level)
+
+
+async def run_idapython(ctx: RunContext, code: str) -> str:
+    """Execute IDAPython code against the current database.
+
+    Runs on IDA's main thread, so it can use any IDA API (ida_funcs,
+    ida_bytes, ida_name, idc, idautils, ...) and freely read/modify the
+    database. The modules ``idaapi``, ``idc`` and ``idautils`` are
+    pre-imported. Only IDA modules may be imported - host modules (os, sys,
+    subprocess, socket, requests, ...) are blocked. Output printed via
+    ``print()`` is returned.
+
+    NOTE: keep snippets short. An infinite loop would occupy IDA's main thread
+    until interrupted, just like a hand-typed IDAPython script.
+    """
+    import builtins
+    import contextlib
+    import io
+
+    def _run() -> str:
+        buf = io.StringIO()
+        orig_import = builtins.__import__
+        try:
+            namespace = {
+                "__builtins__": builtins,
+                "__name__": "__ida_copilot__",
+            }
+            # Pre-import the IDA modules the model is most likely to need.
+            for mod in ("idaapi", "idc", "idautils", "ida_funcs", "ida_bytes",
+                        "ida_name", "ida_nalt", "ida_xref", "ida_kernwin"):
+                try:
+                    namespace[mod] = __import__(mod)
+                except Exception:
+                    namespace[mod] = None
+            builtins.__import__ = _ida_python_import
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+                exec(compile(code, "<ida_copilot>", "exec"), namespace, namespace)  # noqa: S102
+            return buf.getvalue().rstrip() or "(no output)"
+        except BaseException as e:  # noqa: BLE001
+            return f"error: {type(e).__name__}: {e}"
+        finally:
+            builtins.__import__ = orig_import
+
+    return _strip_control_chars(_run_on_main(_run, write=True))
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -735,4 +799,5 @@ IDA_TOOLS = [
     del_struct_member,
     apply_struct_type,
     list_local_types,
+    run_idapython,
 ]

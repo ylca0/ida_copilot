@@ -43,6 +43,8 @@ class Settings:
     model: str = field(default_factory=lambda: _env_default("OPENAI_MODEL", "gpt-4o-mini"))
     max_context_length: int = 32000
     max_output_length: int = 4096
+    request_timeout: int = 60  # seconds, for model API requests
+    tool_timeout: int = 15  # seconds, for tool execution
     thinking: bool = True
     system_prompt: str = "You are an expert reverse-engineering assistant embedded in IDA Pro. You can inspect the database and modify it with the provided tools. Prefer concise, actionable answers. Quote addresses as hex. When the user asks for a change, perform it with a tool call and confirm what you changed."
 
